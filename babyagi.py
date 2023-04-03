@@ -1,13 +1,10 @@
 import openai
-import pinecone
+import hnsqlite
 import time
 from collections import deque
 from typing import Dict, List
 
-#Set API Keys
-OPENAI_API_KEY = ""
-PINECONE_API_KEY = ""
-PINECONE_ENVIRONMENT = "us-east1-gcp" #Pinecone Environment (eg. "us-east1-gcp")
+# Set OPENAI_API_KEY as environment variable
 
 #Set Variables
 YOUR_TABLE_NAME = "test-table"
@@ -18,20 +15,9 @@ YOUR_FIRST_TASK = "Develop a task list."
 print("\033[96m\033[1m"+"\n*****OBJECTIVE*****\n"+"\033[0m\033[0m")
 print(OBJECTIVE)
 
-# Configure OpenAI and Pinecone
-openai.api_key = OPENAI_API_KEY
-pinecone.init(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
 
-# Create Pinecone index
-table_name = YOUR_TABLE_NAME
-dimension = 1536
-metric = "cosine"
-pod_type = "p1"
-if table_name not in pinecone.list_indexes():
-    pinecone.create_index(table_name, dimension=dimension, metric=metric, pod_type=pod_type)
-
-# Connect to the index
-index = pinecone.Index(table_name)
+# Create hnsqlite collection
+collection = hnsqlite.Collection(YOUR_TABLE_NAME, dimension=1536)
 
 # Task list
 task_list = deque([])
@@ -68,7 +54,6 @@ def prioritization_agent(this_task_id:int):
             task_list.append({"task_id": task_id, "task_name": task_name})
 
 def execution_agent(objective:str,task: str) -> str:
-    #context = context_agent(index="quickstart", query="my_search_query", n=5)
     context=context_agent(index=YOUR_TABLE_NAME, query=objective, n=5)
     #print("\n*******RELEVANT CONTEXT******\n")
     #print(context)
@@ -84,14 +69,16 @@ def execution_agent(objective:str,task: str) -> str:
     return response.choices[0].text.strip()
 
 def context_agent(query: str, index: str, n: int):
+    print("search for: ", query)
     query_embedding = get_ada_embedding(query)
-    index = pinecone.Index(index_name=index)
-    results = index.query(query_embedding, top_k=n,
-    include_metadata=True)
-    #print("***** RESULTS *****")
-    #print(results)
-    sorted_results = sorted(results.matches, key=lambda x: x.score, reverse=True)    
-    return [(str(item.metadata['task'])) for item in sorted_results]
+    try:
+        results = collection.search(query_embedding, k=n)   # results returned sorted by distance
+    except:
+        return []
+    print("***** RESULTS *****")
+    tasks_results = [(str(item.metadata['task'])) for item in results]
+    print(tasks_results)
+    return tasks_results
 
 # Add the first task
 first_task = {
@@ -120,14 +107,18 @@ while True:
         print("\033[93m\033[1m"+"\n*****TASK RESULT*****\n"+"\033[0m\033[0m")
         print(result)
 
-        # Step 2: Enrich result and store in Pinecone
+        # Step 2: Enrich result and store in hnsqlite
         enriched_result = {'data': result}  # This is where you should enrich the result if needed
         result_id = f"result_{task['task_id']}"
-        vector = enriched_result['data']  # extract the actual result from the dictionary
-        index.upsert([(result_id, get_ada_embedding(vector),{"task":task['task_name'],"result":result})])
+                                 
+        emb = hnsqlite.Embedding(doc_ids  = result_id, 
+                                 vector   = get_ada_embedding(result),
+                                 text     = result,                              
+                                 metadata = {"task":task['task_name'],"result":result})
+        collection.add_embedding(emb)
 
     # Step 3: Create new tasks and reprioritize task list
-    new_tasks = task_creation_agent(OBJECTIVE,enriched_result, task["task_name"], [t["task_name"] for t in task_list])
+    new_tasks = task_creation_agent(OBJECTIVE, enriched_result, task["task_name"], [t["task_name"] for t in task_list])
 
     for new_task in new_tasks:
         task_id_counter += 1
